@@ -1,0 +1,69 @@
+# ── WV channel — water-vapour brightness temperature ────────────────────────
+channel: wv
+source_dir: sample-images/Jan26_168372
+file_glob: "*_IMG_WV.tif"
+
+# Output locations (relative to repo root) — self-contained under wv/
+latent_dir: wv/latents
+manifest_path: wv/manifest.csv
+checkpoint_dir: wv/checkpoints
+output_dir: wv/outputs
+
+# Image preprocessing — resize 888x968 -> 256x288 (W x H), aspect-preserving.
+# Both dims divisible by 8 -> SD-VAE latent 4 x 36 x 32.
+resize_height: 288
+resize_width: 256
+
+# Normalization to [-1, 1]. low/high are robust 1st/99th percentiles.
+# Auto-filled by encode_latents.py on first run; edit to pin them.
+norm:
+  low: null
+  high: null
+
+# Pretrained SD-VAE checkpoint
+vae_model: stabilityai/sd-vae-ft-mse
+latent_scaling_factor: 0.18215   # used if vae.config.scaling_factor is missing
+
+# Day/night handling — DISABLED for WV (usable 24 h, all 48 slots modelled).
+day_night:
+  enabled: false
+  scene_lat: 21.0
+  scene_lon: 79.0
+  elevation_threshold_deg: 0.0
+
+# RNN input sequence
+sequence:
+  input_len: 8             # T past latents fed to the ConvLSTM
+  cadence_minutes: 30
+
+# ConvLSTM training
+train:
+  num_layers: 2
+  hidden_dims: [64, 64]
+  kernel_size: 3
+  batch_size: 16
+  epochs: 60
+  lr: 0.0003
+  weight_decay: 0.0
+  val_fraction: 0.1
+  test_fraction: 0.1
+  scheduled_sampling: true   # mix in model predictions during training
+  unroll_steps: 3            # short multi-step unroll for rollout robustness
+  seed: 42
+
+# 48-frame day forecast
+forecast:
+  horizon: 48
+
+# Latent flow-matching model (Stage 3-flow / Stage 4-flow).
+# Conditional flow matching in latent space — see src/models/flow_model.py.
+flow:
+  hidden: 96          # base channel count in the ResBlocks
+  n_blocks: 4         # number of FiLM-conditioned ResBlocks
+  t_dim: 128          # time-embedding dimension
+  batch_size: 32
+  epochs: 80
+  lr: 0.0002
+  weight_decay: 0.0
+  ode_steps: 10       # Euler steps per sample at forecast time
+  seed: 42

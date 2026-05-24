@@ -1,0 +1,14 @@
+# Latent-space nowcasting for INSAT VIS & WV channels
+# Tested target: Python 3.10+ (Google Colab)
+torch>=2.1
+diffusers>=0.27
+accelerate>=0.27
+tifffile>=2024.1
+imagecodecs>=2024.1
+numpy>=1.26,<2.1
+scikit-image>=0.22
+matplotlib>=3.7
+imageio>=2.31
+tqdm>=4.66
+pyyaml>=6.0
+astral>=3.2

@@ -1,0 +1,30 @@
+# Dataset (raw INSAT TIFFs + archive)
+sample-images/
+sample-images.zip
+
+# Generated artifacts (per channel)
+vis/latents/
+vis/checkpoints/
+vis/outputs/
+wv/latents/
+wv/checkpoints/
+wv/outputs/
+
+# Manifests (regenerated from data)
+**/manifest.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
