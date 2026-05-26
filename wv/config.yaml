@@ -56,14 +56,22 @@ forecast:
   horizon: 48
 
 # Latent flow-matching model (Stage 3-flow / Stage 4-flow).
-# Conditional flow matching in latent space — see src/models/flow_model.py.
+# 2-level U-Net (see src/models/flow_model.py) with bottleneck attention.
+# Training-hygiene keys (warmup_frac, ema_decay, unroll_steps, unroll_prob)
+# are read by src/train_flow.py with safe defaults — listed here for clarity.
 flow:
-  hidden: 96          # base channel count in the ResBlocks
-  n_blocks: 4         # number of FiLM-conditioned ResBlocks
+  hidden: 96          # base channel count (bottleneck = 2 * hidden = 192)
+  n_blocks: 2         # ResBlocks per U-Net level (enc0, enc1, dec0)
   t_dim: 128          # time-embedding dimension
+  use_attn: true      # 1-head self-attention at the bottleneck (18x16)
   batch_size: 32
   epochs: 80
   lr: 0.0002
-  weight_decay: 0.0
+  weight_decay: 1.0e-4
   ode_steps: 10       # Euler steps per sample at forecast time
   seed: 42
+
+  warmup_frac: 0.05
+  ema_decay: 0.999
+  unroll_steps: 2
+  unroll_prob: 0.3

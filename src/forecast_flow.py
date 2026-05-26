@@ -42,6 +42,9 @@ def main():
     ap = argparse.ArgumentParser(description="Stage 4 (flow): 48-frame forecast.")
     ap.add_argument("--config", required=True)
     ap.add_argument("--date", default=None, help="forecast date YYYYMMDD (UTC)")
+    ap.add_argument("--samples", type=int, default=1,
+                    help="number of independent rollouts to ensemble in pixel "
+                         "space (default 1 = single sample)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -72,13 +75,17 @@ def main():
     ckpt_path = os.path.join(resolve(cfg, "checkpoint_dir"), "best_flow.pt")
     ckpt = torch.load(ckpt_path, map_location=device)
     cond_ch = int(ckpt["cond_ch"])
+    # joint_steps is needed for the sanity check below + the rollout loop
+    joint_steps = int(ckpt.get("joint_steps",
+                               cfg["flow"].get("joint_steps", 4)))
     model = build_flow_model(cfg, cond_ch=cond_ch).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
-    expected = T * (5 if sza_enabled else 4) + (1 if sza_enabled else 0)
+    expected = T * (5 if sza_enabled else 4) + (joint_steps if sza_enabled else 0)
     if cond_ch != expected:
         raise SystemExit(f"[flow-forecast] cond_ch mismatch — checkpoint {cond_ch} "
-                         f"vs config expected {expected}")
+                         f"vs config expected {expected} "
+                         f"(joint_steps={joint_steps})")
 
     vae = load_vae(cfg, device)
     sf = scaling_factor(cfg, vae)
@@ -116,32 +123,71 @@ def main():
     if len(prior) < T:
         raise SystemExit(f"[flow-forecast] need {T} prior frames, "
                          f"have {len(prior)}")
-    past_lat = [load_latent(r["latent_path"]) for r in prior[-T:]]
-    past_ts = [r["utc"] for r in prior[-T:]]
+    seed_lat = [load_latent(r["latent_path"]) for r in prior[-T:]]
+    seed_ts = [r["utc"] for r in prior[-T:]]
 
     ode_steps = int(cfg["flow"]["ode_steps"])
-    pred_latents = []
+    n_samples = max(1, int(args.samples))
+    # joint_steps was read above (during the sanity check) — same value used here
 
-    # ── autoregressive rollout ───────────────────────────────────────────────
-    for ts in slots:
-        parts = []
-        for k in range(T):
-            parts.append(past_lat[k])                         # (4, H, W)
+    def one_rollout():
+        """Single autoregressive rollout from the shared seed; new noise each time.
+
+        With joint_steps=K the model samples a block of K next latents per call;
+        we slide the window forward by K and continue until ``horizon`` frames
+        are produced. K=1 reduces to the original one-at-a-time loop.
+        """
+        past_lat = list(seed_lat)
+        past_ts = list(seed_ts)
+        out = []
+        block_start = 0
+        while block_start < horizon:
+            K = min(joint_steps, horizon - block_start)
+            block_slots = slots[block_start:block_start + K]
+            parts = []
+            for k in range(T):
+                parts.append(past_lat[k])
+                if sza_enabled:
+                    parts.append(sza_plane(past_ts[k]))
             if sza_enabled:
-                parts.append(sza_plane(past_ts[k]))           # (1, H, W)
-        if sza_enabled:
-            parts.append(sza_plane(ts))                       # target SZA
-        cond = torch.cat(parts, dim=0)[None].to(device)        # (1, cond_ch, H, W)
-        if cond.shape[1] != cond_ch:
-            raise SystemExit(f"[flow-forecast] built cond_ch {cond.shape[1]} != "
-                             f"model cond_ch {cond_ch}")
-        nxt = flow_sample(model, cond, (1, 4, latent_h, latent_w),
-                          steps=ode_steps, device=device)[0].cpu()
-        pred_latents.append(nxt)
-        past_lat = past_lat[1:] + [nxt]
-        past_ts = past_ts[1:] + [ts]
+                # K target SZA planes — pad with the last slot's SZA if K < joint_steps
+                for k in range(joint_steps):
+                    if k < K:
+                        parts.append(sza_plane(block_slots[k]))
+                    else:
+                        parts.append(sza_plane(block_slots[-1]))
+            cond = torch.cat(parts, dim=0)[None].to(device)
+            if cond.shape[1] != cond_ch:
+                raise SystemExit(f"[flow-forecast] built cond_ch {cond.shape[1]} "
+                                 f"!= model cond_ch {cond_ch}")
+            # output channels = 4 * joint_steps; reshape into K frames
+            block = flow_sample(model, cond,
+                                (1, 4 * joint_steps, latent_h, latent_w),
+                                steps=ode_steps, device=device)[0].cpu()
+            block = block.view(joint_steps, 4, latent_h, latent_w)
+            for k in range(K):
+                nxt = block[k]
+                out.append(nxt)
+                past_lat = past_lat[1:] + [nxt]
+                past_ts = past_ts[1:] + [block_slots[k]]
+            block_start += K
+        return out
 
-    forecast_imgs = decode_latents(pred_latents)
+    # ── run N independent rollouts, average DECODED pixels per slot ──────────
+    sample_imgs = []
+    for s in range(n_samples):
+        pred_latents = one_rollout()
+        sample_imgs.append(decode_latents(pred_latents))
+        if n_samples > 1:
+            print(f"[flow-forecast] sample {s + 1}/{n_samples} done")
+
+    if n_samples == 1:
+        forecast_imgs = sample_imgs[0]
+    else:
+        # ensemble in pixel space — never average latents (collapses to mean)
+        stack = np.stack([np.stack(s) for s in sample_imgs])   # (N, horizon, H, W)
+        forecast_imgs = list(stack.mean(axis=0).astype(np.float32))
+        print(f"[flow-forecast] pixel-space ensemble over {n_samples} samples")
 
     # ── VIS night fill ───────────────────────────────────────────────────────
     if sza_enabled:
@@ -186,6 +232,8 @@ def main():
     out_dir = resolve(cfg, "output_dir")
     os.makedirs(out_dir, exist_ok=True)
     tag = date.strftime("%Y%m%d")
+    if n_samples > 1:
+        tag = f"{tag}_ens{n_samples}"            # keep single-sample run intact
     np.save(os.path.join(out_dir, f"flow_forecast_{tag}.npy"),
             np.stack(forecast_imgs).astype(np.float32))
     titles = [f"{utc_to_ist(ts):%H:%M} IST{'' if day_flags[i] else ' (night)'}"

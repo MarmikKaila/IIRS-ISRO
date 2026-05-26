@@ -64,12 +64,24 @@ forecast:
 # Latent flow-matching model (Stage 3-flow / Stage 4-flow).
 # Conditional flow matching in latent space — see src/models/flow_model.py.
 flow:
-  hidden: 96          # base channel count in the ResBlocks
-  n_blocks: 4         # number of FiLM-conditioned ResBlocks
+  hidden: 96          # base channel count (bottleneck = 2 * hidden = 192)
+  n_blocks: 2         # ResBlocks per U-Net level (enc0, enc1, dec0)
   t_dim: 128          # time-embedding dimension
+  use_attn: true      # 1-head self-attention at the bottleneck (18x16)
   batch_size: 32
   epochs: 80
   lr: 0.0002
-  weight_decay: 0.0
+  weight_decay: 1.0e-4    # AdamW regularization
   ode_steps: 10       # Euler steps per sample at forecast time
   seed: 42
+
+  # Training-hygiene additions (Phase A.5 from the plan).
+  # These keys have safe defaults inside src/train_flow.py — listed here
+  # only for clarity; you don't need to set them to enable the fix.
+  warmup_frac: 0.05       # fraction of total steps used for linear LR warm-up
+  ema_decay: 0.999        # EMA decay for shadow weights (saved as checkpoint)
+  unroll_steps: 2         # training dataset emits 2-step future targets
+  unroll_prob: 0.3        # fraction of batches that use exposure-bias unroll
+  joint_steps: 4          # Phase C: K next frames predicted jointly per
+                          # forward pass (enforces temporal coherence). When
+                          # > 1, the K-block model replaces the unroll loss.
