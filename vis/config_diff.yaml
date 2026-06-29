@@ -1,0 +1,88 @@
+# ── VIS — diffcast pipeline configuration ─────────────────────────────────
+# Parallel to vis/config_fc.yaml (which stays for flowcast). This config
+# drives: full VAE fine-tune (encoder + decoder), latent encoding with the
+# new VAE, EDM latent diffusion forecaster training, and Heun sampling.
+channel: vis
+source_dir: sample-images/Jan26_167972
+file_glob: "*_IMG_VIS.tif"
+
+# diffcast-specific output paths (NEVER overlap with flowcast's *_fc paths)
+latent_dir: vis/latents_diff
+manifest_path: vis/manifest_diff.csv
+checkpoint_dir: vis/checkpoints_diff
+output_dir: vis/outputs_diff
+
+resize_height: 288
+resize_width: 256
+
+# Auto-filled by train_vae on first run (drops into config via save_config).
+norm:
+  low: null
+  high: null
+
+# ── VAE: SEVIR pretrained → unfreeze EVERYTHING → fine-tune on INSAT VIS ──
+vae:
+  hf_id: b-rbmp/flowcast-cfm-sevir
+  hf_filename: saved_models/sevir/autoencoder/models/early_stopping_model.pt
+  # Path to OUR fine-tuned full VAE (encoder + decoder). Uncomment after
+  # Phase 1 (train_vae.py) writes it.
+  # full_ckpt: vis/checkpoints_diff/vae_full.pt
+
+vae_train:
+  steps: 15000
+  batch_size: 8
+  lr: 1.0e-5
+  weight_decay: 1.0e-4
+  mse_weight: 1.0
+  lpips_weight: 0.5
+  kl_weight: 1.0e-6           # small KL keeps the posterior near-Gaussian
+  lpips_backbone: vgg
+  warmup_steps: 500
+  val_interval: 500
+  log_interval: 50
+  fp16: true
+  target_psnr: 30.0           # decision gate before Phase 2
+
+# VIS uses daytime-only contiguous runs and night dark-fill at forecast time.
+day_night:
+  enabled: true
+  scene_lat: 21.0
+  scene_lon: 79.0
+  elevation_threshold_deg: 0.0
+  daytime_runs_only: true
+
+sequence:
+  input_len: 5                # VIS daytime runs ~22 frames; 5+12 fits
+  cadence_minutes: 30
+
+train:
+  val_fraction: 0.1
+  test_fraction: 0.1
+
+# ── EDM latent diffusion forecaster (Karras et al. 2022) ──────────────────
+diffusion:
+  hidden: 128                 # T4-friendly cap; auto-reduced if needed
+  n_blocks: 2
+  attn_heads: 4
+  dropout: 0.1
+  joint_steps: 12             # T_lead — frames predicted per forward
+  batch_size: 2
+  epochs: 100
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  warmup_frac: 0.01
+  ema_decay: 0.999
+  fp16: true
+  seed: 42
+
+  # EDM hyperparameters (Karras 2022, Table 1)
+  sigma_min: 0.002
+  sigma_max: 80.0
+  sigma_data: 0.5
+  P_mean: -1.2                # log-normal mean for training-time sigma
+  P_std: 1.2
+  sampler_steps: 18           # Heun ODE steps at inference
+  sampler_rho: 7.0            # Karras step-size schedule
+
+forecast:
+  horizon: 48

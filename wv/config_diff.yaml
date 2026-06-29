@@ -1,0 +1,78 @@
+# ── WV — diffcast pipeline configuration ──────────────────────────────────
+# Parallel to wv/config_fc.yaml (which stays for flowcast).
+channel: wv
+source_dir: sample-images/Jan26_168372
+file_glob: "*_IMG_WV.tif"
+
+latent_dir: wv/latents_diff
+manifest_path: wv/manifest_diff.csv
+checkpoint_dir: wv/checkpoints_diff
+output_dir: wv/outputs_diff
+
+resize_height: 288
+resize_width: 256
+
+norm:
+  low: null
+  high: null
+
+vae:
+  hf_id: b-rbmp/flowcast-cfm-sevir
+  hf_filename: saved_models/sevir/autoencoder/models/early_stopping_model.pt
+  # full_ckpt: wv/checkpoints_diff/vae_full.pt
+
+vae_train:
+  steps: 15000
+  batch_size: 8
+  lr: 1.0e-5
+  weight_decay: 1.0e-4
+  mse_weight: 1.0
+  lpips_weight: 0.5
+  kl_weight: 1.0e-6
+  lpips_backbone: vgg
+  warmup_steps: 500
+  val_interval: 500
+  log_interval: 50
+  fp16: true
+  target_psnr: 30.0
+
+# WV is 24h continuous — no day/night handling.
+day_night:
+  enabled: false
+  scene_lat: 21.0
+  scene_lon: 79.0
+  elevation_threshold_deg: 0.0
+  daytime_runs_only: false
+
+sequence:
+  input_len: 13               # WV has full 24h continuity; paper-spec 13+12=25
+  cadence_minutes: 30
+
+train:
+  val_fraction: 0.1
+  test_fraction: 0.1
+
+diffusion:
+  hidden: 128
+  n_blocks: 2
+  attn_heads: 4
+  dropout: 0.1
+  joint_steps: 12
+  batch_size: 2
+  epochs: 100
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  warmup_frac: 0.01
+  ema_decay: 0.999
+  fp16: true
+  seed: 42
+  sigma_min: 0.002
+  sigma_max: 80.0
+  sigma_data: 0.5
+  P_mean: -1.2
+  P_std: 1.2
+  sampler_steps: 18
+  sampler_rho: 7.0
+
+forecast:
+  horizon: 48

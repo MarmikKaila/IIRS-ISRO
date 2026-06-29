@@ -1,0 +1,163 @@
+% ─── Generative forecasting (latent flow / diffusion) ─────────────────────
+@inproceedings{flowcast2026,
+  title     = {{FlowCast}: Conditional Flow Matching for Precipitation Nowcasting},
+  author    = {Perrone Ribeiro, B. and Faganeli Pucer, J.},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2026},
+  note      = {Reference architecture used in this work; \url{https://huggingface.co/b-rbmp/flowcast-cfm-sevir}},
+}
+
+@inproceedings{lipman2023flowmatching,
+  title     = {Flow Matching for Generative Modeling},
+  author    = {Lipman, Yaron and Chen, Ricky T.~Q. and Ben-Hamu, Heli and Nickel, Maximilian and Le, Matt},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2023},
+}
+
+@article{karras2022edm,
+  title   = {Elucidating the Design Space of Diffusion-Based Generative Models},
+  author  = {Karras, Tero and Aittala, Miika and Aila, Timo and Laine, Samuli},
+  journal = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year    = {2022},
+  note    = {The {EDM} formulation: preconditioning, log-normal $\sigma$ schedule, Heun sampler.},
+}
+
+@article{ho2020ddpm,
+  title   = {Denoising Diffusion Probabilistic Models},
+  author  = {Ho, Jonathan and Jain, Ajay and Abbeel, Pieter},
+  journal = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year    = {2020},
+}
+
+@inproceedings{song2021ddim,
+  title     = {Denoising Diffusion Implicit Models},
+  author    = {Song, Jiaming and Meng, Chenlin and Ermon, Stefano},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2021},
+}
+
+% ─── Backbone architecture ─────────────────────────────────────────────────
+@article{gao2022earthformer,
+  title   = {Earthformer: Exploring Space-Time Transformers for Earth System Forecasting},
+  author  = {Gao, Zhihan and Shi, Xingjian and Wang, Hao and Zhu, Yi and Wang, Yuyang and Li, Mu and Yeung, Dit-Yan},
+  journal = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year    = {2022},
+}
+
+@inproceedings{shi2015convlstm,
+  title     = {Convolutional {LSTM} Network: A Machine Learning Approach for Precipitation Nowcasting},
+  author    = {Shi, Xingjian and Chen, Zhourong and Wang, Hao and Yeung, Dit-Yan and Wong, Wai-Kin and Woo, Wang-chun},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2015},
+}
+
+% ─── Variational autoencoder + perceptual loss ─────────────────────────────
+@inproceedings{kingma2014vae,
+  title     = {Auto-Encoding Variational {B}ayes},
+  author    = {Kingma, Diederik P. and Welling, Max},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2014},
+}
+
+@inproceedings{rombach2022ldm,
+  title     = {High-Resolution Image Synthesis with Latent Diffusion Models},
+  author    = {Rombach, Robin and Blattmann, Andreas and Lorenz, Dominik and Esser, Patrick and Ommer, Bj{\"o}rn},
+  booktitle = {{IEEE/CVF} Conference on Computer Vision and Pattern Recognition (CVPR)},
+  year      = {2022},
+  note      = {Source of the {SD-VAE} AutoencoderKL architecture.},
+}
+
+@inproceedings{zhang2018lpips,
+  title     = {The Unreasonable Effectiveness of Deep Features as a Perceptual Metric},
+  author    = {Zhang, Richard and Isola, Phillip and Efros, Alexei A. and Shechtman, Eli and Wang, Oliver},
+  booktitle = {{IEEE/CVF} Conference on Computer Vision and Pattern Recognition (CVPR)},
+  year      = {2018},
+}
+
+@article{simonyan2014vgg,
+  title   = {Very Deep Convolutional Networks for Large-Scale Image Recognition},
+  author  = {Simonyan, Karen and Zisserman, Andrew},
+  journal = {arXiv preprint arXiv:1409.1556},
+  year    = {2014},
+}
+
+@article{blau2018perception,
+  title   = {The Perception-Distortion Tradeoff},
+  author  = {Blau, Yochai and Michaeli, Tomer},
+  journal = {{IEEE/CVF} Conference on Computer Vision and Pattern Recognition (CVPR)},
+  year    = {2018},
+}
+
+% ─── Image-quality metrics ─────────────────────────────────────────────────
+@article{wang2004ssim,
+  title   = {Image Quality Assessment: From Error Visibility to Structural Similarity},
+  author  = {Wang, Zhou and Bovik, Alan C. and Sheikh, Hamid R. and Simoncelli, Eero P.},
+  journal = {{IEEE} Transactions on Image Processing},
+  volume  = {13},
+  number  = {4},
+  pages   = {600--612},
+  year    = {2004},
+}
+
+% ─── Meteorological metrics ────────────────────────────────────────────────
+@article{schaefer1990csi,
+  title   = {The Critical Success Index as an Indicator of Warning Skill},
+  author  = {Schaefer, Joseph T.},
+  journal = {Weather and Forecasting},
+  volume  = {5},
+  number  = {4},
+  pages   = {570--575},
+  year    = {1990},
+}
+
+@article{roberts2008fss,
+  title   = {Scale-Selective Verification of Rainfall Accumulations from High-Resolution Forecasts of Convective Events},
+  author  = {Roberts, Nigel M. and Lean, Humphrey W.},
+  journal = {Monthly Weather Review},
+  volume  = {136},
+  number  = {1},
+  pages   = {78--97},
+  year    = {2008},
+}
+
+@inproceedings{matheson1976crps,
+  title     = {Scoring Rules for Continuous Probability Distributions},
+  author    = {Matheson, James E. and Winkler, Robert L.},
+  booktitle = {Management Science},
+  volume    = {22},
+  number    = {10},
+  pages     = {1087--1096},
+  year      = {1976},
+}
+
+% ─── Datasets ──────────────────────────────────────────────────────────────
+@article{veillette2020sevir,
+  title   = {{SEVIR}: A Storm Event Imagery Dataset for Deep Learning Applications in Radar and Satellite Meteorology},
+  author  = {Veillette, Mark and Samsi, Siddharth and Mattioli, Chris},
+  journal = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year    = {2020},
+  note    = {Source dataset of the pretrained AutoencoderKL weights used in this work.},
+}
+
+@misc{insat3s,
+  title        = {{INSAT-3D/3S} Satellite Imagery, Indian Space Research Organisation},
+  author       = {{Indian Space Research Organisation (ISRO)}},
+  howpublished = {\url{https://www.isro.gov.in/INSAT_Series.html}},
+  year         = {2025},
+  note         = {Source of the {VIS} reflectance and {WV} brightness-temperature {TIFF} data used in this study.},
+}
+
+% ─── Tooling / libraries (light citations for reproducibility) ─────────────
+@inproceedings{paszke2019pytorch,
+  title     = {{PyTorch}: An Imperative Style, High-Performance Deep Learning Library},
+  author    = {Paszke, Adam and others},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2019},
+}
+
+@misc{vonplaten2022diffusers,
+  title        = {Diffusers: State-of-the-Art Diffusion Models},
+  author       = {von Platen, Patrick and others},
+  howpublished = {\url{https://github.com/huggingface/diffusers}},
+  year         = {2022},
+}

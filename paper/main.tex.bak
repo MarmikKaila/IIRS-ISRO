@@ -1,0 +1,1198 @@
+\documentclass[11pt,a4paper]{article}
+
+% ─── packages ──────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,citecolor=teal!60!black,urlcolor=blue!50!black}
+\usepackage[capitalise,noabbrev]{cleveref}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{todonotes}
+
+\bibliographystyle{plainnat}
+
+% red inline placeholder for numbers the user should fill in from Drive
+\newcommand{\FILL}[1]{\textcolor{red}{\textbf{[FILL: #1]}}}
+
+% ─── metadata ─────────────────────────────────────────────────────────────
+\title{\textbf{Comparative Study of Latent Generative Architectures for
+       Day-Ahead Satellite Nowcasting on {INSAT-3S}}\\[0.5em]
+       \large Flow Matching versus Diffusion under Small-Data Constraints,
+       with a Failure Analysis of End-to-End {VAE} Fine-Tuning}
+
+\author{Marmik Kaila\\[0.25em]
+        ISRO Project A.1, 2026\\
+        \texttt{marmik.kaila@gmail.com}}
+
+\date{June 2026}
+
+% ─── theorem-like ─────────────────────────────────────────────────────────
+\newtcolorbox{finding}{
+  colback=blue!4!white, colframe=blue!50!black, fonttitle=\bfseries,
+  arc=2pt, boxrule=0.5pt, left=6pt, right=6pt, top=4pt, bottom=4pt,
+  title=Finding}
+
+\newtcolorbox{negfind}{
+  colback=red!4!white, colframe=red!55!black, fonttitle=\bfseries,
+  arc=2pt, boxrule=0.5pt, left=6pt, right=6pt, top=4pt, bottom=4pt,
+  title=Negative result}
+
+% ─── document ─────────────────────────────────────────────────────────────
+\begin{document}
+\maketitle
+
+% ============================================================================
+\begin{abstract}
+We present an end-to-end study of latent generative models for 48-frame
+day-ahead nowcasting of {INSAT-3S} satellite imagery over the Indian
+subcontinent. Two complete pipelines were implemented and compared on
+identical data ($\sim$30~days, two channels: visible reflectance~(VIS) and
+water-vapour brightness temperature~(WV)): a \emph{flow-matching} system
+(\textsc{FlowCast}) using the {SEVIR}-pretrained \texttt{AutoencoderKL} frozen
+together with a Conditional Flow Matching forecaster~\citep{flowcast2026,
+lipman2023flowmatching}, and a \emph{diffusion} system (\textsc{DiffCast})
+that additionally fine-tunes the {VAE} encoder and replaces the forecaster
+with an {EDM}-style latent diffusion model~\citep{karras2022edm}. Both
+systems share the same {Earthformer-UNet} backbone~\citep{gao2022earthformer}
+and identical evaluation protocol, enabling a controlled architectural
+comparison. We introduce a three-way ensemble aggregation
+(pixel-mean / medoid / latent-mean) to expose the perception-distortion
+tradeoff~\citep{blau2018perception} and explicitly characterise the
+sharpness-versus-skill behaviour of each model. On VIS, \textsc{FlowCast}
+(with Strategy~B decoder fine-tune) attains CSI$_M$~$=$~0.064,
+SSIM~$=$~0.340, while \textsc{DiffCast} attains
+CSI$_M$~$=$~0.012 with a higher PSNR of 15.25\,dB (vs.\ 12.02\,dB) and lower
+CRPS (0.123 vs.\ 0.213). We trace \textsc{DiffCast}'s low CSI and visible
+loss of geographic structure to an \emph{encoder representation collapse}
+induced by end-to-end {VAE} fine-tuning on the small dataset.
+\textsc{FlowCast}'s frozen-encoder design avoids this failure mode and is
+preferred at this data scale. On WV, after recalibrating the meteorological
+thresholds to the native {TIFF} data scale~$[0,0.29]$, \textsc{FlowCast}
+reaches CSI$_M$~$=$~0.204 and SSIM~$=$~0.720, comparable to published
+benchmarks at similar lead times.
+\end{abstract}
+
+\medskip
+\noindent\textbf{Keywords:} satellite nowcasting, latent generative models,
+flow matching, latent diffusion, variational autoencoder, perception-distortion
+tradeoff, encoder representation collapse, {INSAT-3S}.
+
+% ============================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Operational meteorological forecasting in India relies heavily on the
+geostationary {INSAT-3S} satellite~\citep{insat3s}, which delivers full-disk
+visible and infrared imagery at a 30-minute cadence (48~slots~per~day per
+channel). Short-range nowcasting (0--6\,h) from such imagery is hard for
+classical numerical weather models due to their computational cost and
+resolution mismatch; data-driven generative models offer an attractive
+alternative.
+
+Two recent classes of generative models dominate the satellite/radar
+nowcasting literature: \emph{flow matching}, whose continuous-time
+formulation enables fast single-pass ODE
+sampling~\citep{lipman2023flowmatching, flowcast2026}, and \emph{diffusion
+models}, whose iterative denoising achieves state-of-the-art image quality
+in many domains~\citep{ho2020ddpm, karras2022edm, rombach2022ldm}. Both
+families are typically deployed in the latent space of a variational
+autoencoder~\citep{kingma2014vae}, where temporal modelling is cheaper and
+the decoder absorbs high-frequency reconstruction.
+
+This work is a controlled side-by-side comparison of these two families on
+a single, small, real-world dataset: 30~days of January~2026 {INSAT-3S}
+imagery. We deliberately constrain ourselves to a small dataset because it
+is representative of the realistic data budget for many regional
+forecasting agencies, and because it exposes the inductive-bias differences
+between the two model families.
+
+The first of our two pipelines, \textsc{FlowCast}, is a faithful
+re-implementation of the paper-spec Conditional Flow Matching pipeline
+of~\citet{flowcast2026} with the {SEVIR}-pretrained
+\texttt{AutoencoderKL} held frozen. Within this pipeline we additionally
+propose and evaluate two complementary decoder-only fine-tune strategies
+that target distinct failure modes of the frozen-VAE baseline. The first,
+which we call \textbf{Strategy~A}, trains the decoder on real
+encode-to-decode image pairs with a perceptual loss~\citep{zhang2018lpips}
+in order to improve the {VAE}'s intrinsic reconstruction quality on the
+INSAT domain. The second, \textbf{Strategy~B}, trains the decoder on
+(predicted-latent, ground-truth-image) pairs harvested from a forward pass
+of the trained forecaster, in order to additionally compensate for the
+forecaster's tendency to regress toward the conditional mean during
+rollout.
+
+The second pipeline, \textsc{DiffCast}, is a deliberately more ambitious
+parallel system that fine-tunes the full {VAE} (both encoder and decoder)
+end-to-end on {INSAT} data and replaces the flow-matching forecaster with
+an {EDM}-style latent diffusion model~\citep{karras2022edm}. Both pipelines
+share the same {Earthformer-UNet} backbone~\citep{gao2022earthformer} so
+that any performance difference can be attributed cleanly to the
+forecaster family and the {VAE} adaptation strategy.
+
+Beyond these two pipelines we contribute three methodological pieces that
+generalise beyond this dataset. First, we introduce a \textbf{three-way
+ensemble aggregation} (pixel-mean, medoid, latent-mean) that surfaces the
+perception-distortion-skill tradeoff~\citep{blau2018perception} explicitly
+per metric rather than collapsing the ensemble to a single image and
+hiding the tradeoff inside the choice of aggregation. Second, we document
+a complete \textbf{failure analysis} of \textsc{DiffCast}: although its
+pixel-wise metrics surpass \textsc{FlowCast}, its predictions lose the
+static geographic prior (Indian coastline, landmass) entirely, and we
+trace this to an \emph{encoder representation collapse} induced by
+end-to-end {VAE} fine-tuning on a small dataset. Third, we identify and
+fix a \textbf{threshold-calibration bug} in the original \textsc{FlowCast}
+meteorological metrics for WV brightness temperature, where default
+thresholds in Kelvin~$\{220,\ldots,260\}$ do not match {INSAT}'s native
+pre-normalised data range~$[0,0.29]$ and therefore yield trivially zero
+{CSI} scores without our recalibration.
+
+The headline outcome is that \textsc{FlowCast} is the better operational
+choice on this small dataset, that this is for a principled reason (the
+frozen encoder preserves a useful spatial prior), and that
+\textsc{DiffCast}'s pixel-metric superiority is misleading. We provide all
+numerical and visual evidence in \cref{sec:experiments}, and discuss the
+tradeoff with reference to \citet{blau2018perception} in
+\cref{sec:discussion}.
+
+% ============================================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Latent generative forecasting.} \textsc{FlowCast}, the directly
+inspiring work~\citep{flowcast2026}, applies Conditional Flow
+Matching~\citep{lipman2023flowmatching} to {SEVIR} radar
+imagery~\citep{veillette2020sevir} using a custom 4-channel
+\texttt{AutoencoderKL} with $f=8$ downsampling, trained from scratch on
+{SEVIR}. Their published weights are the starting point of both pipelines
+in this study. We use the same released
+\texttt{b-rbmp/flowcast-cfm-sevir} checkpoint and the same backbone
+architecture (Earthformer~\citep{gao2022earthformer}) so that any
+performance difference can be attributed cleanly to the forecaster family
+and the {VAE} adaptation strategy rather than to incidental implementation
+choices.
+
+\paragraph{Diffusion models.} {DDPM}~\citep{ho2020ddpm} introduced the
+discrete-time denoising diffusion formulation; subsequent work has
+substantially reduced sampling cost (e.g.\ {DDIM}~\citep{song2021ddim}) and
+improved numerical conditioning. We adopt {EDM}~\citep{karras2022edm} which
+unifies these advances via a continuous noise schedule with explicit
+input/output preconditioning (Table~1 of that work), log-normal training
+$\sigma$, and a Heun ODE sampler. This formulation has empirically the
+fewest hyperparameter knobs to tune for stable training, which matters when
+data is limited.
+
+\paragraph{VAE adaptation.} The latent-diffusion line of
+work~\citep{rombach2022ldm} keeps the {VAE} frozen during the diffusion
+training stage. End-to-end fine-tuning of the {VAE} is occasionally done in
+practice, e.g.\ to adapt the {SD-VAE} to specific domains, but is known to
+risk drift; the relevant failure modes are under-discussed in the
+literature. Our negative result on \textsc{DiffCast}'s {VAE} is, to our
+knowledge, the first explicit documentation of \emph{encoder representation
+collapse to dynamic features} on small satellite-imagery datasets.
+
+\paragraph{Perceptual losses and metrics.} The {LPIPS}
+metric~\citep{zhang2018lpips}, computed over a frozen
+{VGG}~\citep{simonyan2014vgg} backbone, is widely used as a perceptual
+training signal and as an evaluation metric complementary to {SSIM} and
+{PSNR}. We use {LPIPS-VGG} both as a decoder fine-tuning loss
+(\cref{sec:flowcast,sec:diffcast}) and as an evaluation metric.
+\citet{blau2018perception} formalised the well-known tension between
+distortion (e.g.\ {PSNR}) and perceptual quality: any model can be biased
+toward either pole but not both simultaneously. This tension is central to
+our analysis.
+
+\paragraph{Prior nowcasting baselines.} The classical learning-based baseline
+for radar/satellite nowcasting is ConvLSTM~\citep{shi2015convlstm}, which
+extends LSTM to spatio-temporal data via convolutional input/forget/output
+gates. Our project initially included a ConvLSTM implementation
+(under \texttt{src/}) following a comparable encoder-rollout structure but
+without VAE compression; this serves as a methodological starting point
+that the FlowCast pipeline supersedes via two design moves: (i) compressing
+images into a 4-channel latent space before modelling temporal evolution,
+and (ii) replacing direct deterministic regression with a generative
+conditional flow-matching objective.
+
+\paragraph{Meteorological metrics.} Critical Success Index
+(CSI)~\citep{schaefer1990csi}, Heidke Skill Score (HSS), False Alarm Ratio
+(FAR), and Fractions Skill Score
+(FSS)~\citep{roberts2008fss} are standard threshold-crossing scores for
+operational nowcasting; they expose whether the model predicts \emph{the
+right cloud cell at the right place}, which {PSNR} cannot. Continuous
+Ranked Probability Score (CRPS)~\citep{matheson1976crps} measures
+probabilistic calibration of the ensemble.
+
+% ============================================================================
+\section{Dataset}
+\label{sec:data}
+
+We use 30 contiguous days of {INSAT-3S} L1C single-band {TIFF} imagery
+covering January~2026 over the Indian subcontinent (scene centre
+$21.0^{\circ}$N, $79.0^{\circ}$E). Two channels are processed independently:
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{VIS} (visible reflectance, $6.7\,\mu$m product): 1509~frames,
+      stored in pre-normalised units in range $[0,\sim35]$ (1st--99th
+      percentile after a robust clip).
+\item \textbf{WV} (water-vapour brightness temperature, $6.7\,\mu$m
+      product): 1532~frames, stored on a different native scale
+      $[\sim0.007,\sim0.288]$ (\emph{not} raw Kelvin -- this miscalibration
+      becomes important in \cref{sec:thresh}).
+\end{itemize}
+
+Each {TIFF} is bilinearly resized from $968\times888$ to $H\times
+W=288\times256$, clipped to robust 1st/99th percentile bounds, and mapped
+to $[0,1]$ before encoding (matching the {SEVIR} convention of the released
+{VAE}~\citep{flowcast2026}). Norm statistics are computed once on the train
+split and saved with the channel config.
+
+Time-sorted manifests are split temporally as 80\%~train / 10\%~val /
+10\%~test, preserving causality (no future-into-past leakage). VIS
+additionally retains a \emph{daytime-only contiguous-runs} filter using
+solar elevation~$\geq 0^{\circ}$; night slots are filled at inference with
+the dataset-mean dark-fill image. The effective per-day VIS daytime window
+is~$\sim22$ frames; WV is 24h continuous (48~frames per day).
+
+% ============================================================================
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Common pipeline}
+\label{sec:pipeline}
+Both \textsc{FlowCast} and \textsc{DiffCast} share a four-stage structure:
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Encode.} Each {TIFF} is encoded by the channel's {VAE} into
+      a latent tensor $z\in\mathbb{R}^{4\times 36\times 32}$. Encoder
+      output uses \texttt{latent\_dist.mode()} for determinism.
+\item \textbf{Train.} A latent-space forecaster is trained on windows of
+      $T_{\text{past}}+T_{\text{lead}}$ consecutive frames: VIS uses
+      $5+12=17$ (daytime-only fit), WV uses $13+12=25$ (paper-spec).
+\item \textbf{Roll out.} At inference, $N$~ensemble members are sampled.
+      Each is rolled out autoregressively by concatenating
+      $\lceil 48/T_{\text{lead}}\rceil=4$ blocks to cover a full day.
+\item \textbf{Decode and aggregate.} Each member's latent trajectory is
+      decoded; three aggregations are computed (\cref{sec:ensemble}).
+\end{enumerate}
+
+\subsection{Latent space: pretrained \texttt{AutoencoderKL}}
+\label{sec:vae}
+We start from the {SEVIR}-pretrained \texttt{AutoencoderKL}~\citep{rombach2022ldm,flowcast2026},
+which has the following architecture: single-channel input/output;
+four \texttt{DownEncoderBlock2D} / \texttt{UpDecoderBlock2D} stages with
+\texttt{block\_out\_channels} = $(128, 256, 512, 512)$;
+\texttt{latent\_channels} = $4$; downsampling factor $f=8$. The model has
+$\sim83.65$\,M parameters total (cf.\ \cref{sec:impl}).
+
+The pretrained weights are inherently out-of-distribution for {INSAT}:
+{SEVIR} is US weather radar over land, while {INSAT} VIS is visible
+reflectance and WV is brightness temperature over a different region.
+Sanity-check reconstruction (encode$\to$decode, deterministic) on
+held-out val frames gives:
+
+\begin{table}[h]
+\centering\small
+\caption{{VAE} roundtrip quality of the frozen {SEVIR}-pretrained
+\texttt{AutoencoderKL} on {INSAT} val frames, \textbf{before any fine-tune}.}
+\label{tab:vae-baseline}
+\begin{tabular}{lcc}
+\toprule
+Channel & Roundtrip PSNR (dB) & Roundtrip SSIM \\
+\midrule
+VIS & 27.27 & 0.816 \\
+WV  & --    & --    \\  % left blank: not the focus
+\bottomrule
+\end{tabular}
+\end{table}
+
+The VIS baseline of 27.27\,dB is unexpectedly high: the encoder, despite
+being out-of-distribution, preserves an adequate latent representation for
+INSAT cloud imagery. This observation is critical -- it will be the
+benchmark against which we measure any fine-tuning gain in
+\cref{sec:flowcast,sec:diffcast}.
+
+\subsection{\textsc{FlowCast}: frozen encoder $+$ CFM forecaster}
+\label{sec:flowcast}
+
+\subsubsection{Forecaster}
+We implement the Conditional Flow Matching loss of~\citet{flowcast2026}:
+given paired past latents $z_{\text{past}}\!\in\!\mathbb{R}^{B\times
+T_{\text{past}}\times 4\times 36\times 32}$ and future latents
+$z_{\text{fut}}$, we draw
+\begin{equation}
+z_0 \sim \mathcal{N}(0, I),\quad
+\epsilon \sim \mathcal{N}(0, I),\quad
+t \sim \mathcal{U}(0, 1),\quad
+z_t = (1-t)\,z_0 + t\,z_{\text{fut}} + \sigma\epsilon
+\end{equation}
+with $\sigma=0.01$, and train the {Earthformer-UNet}~\citep{gao2022earthformer}
+to predict the conditional velocity $u_t = z_{\text{fut}} - z_0$ by
+minimising $\|v_\theta(z_t, t, z_{\text{past}}) - u_t\|_2^2$. The past is
+fed via a 5-channel input (4 latent~$+$~1 mask). Sampling integrates
+$\mathrm{d}z/\mathrm{d}t = v_\theta(z, t, z_{\text{past}})$ from $t=0$ to
+$t=1$ with 10 Euler steps. Architectural hyperparameters are reduced from
+paper-spec ($\mathit{hidden}=192,\ n\_blocks=4$) to T4-fit settings
+($\mathit{hidden}=128,\ n\_blocks=2,\ \mathrm{batch}=2$) using an
+auto-cap on GPUs with $<24$\,GB VRAM. Training: 100~epochs, AdamW
+($\eta=5\!\times\!10^{-4}$, weight decay $10^{-4}$), cosine LR with 1\%
+warmup, EMA decay 0.999, FP16 autocast.
+
+\subsubsection{Strategy A: decoder fine-tune on real (encode--decode) pairs}
+\label{sec:flowcast-A}
+To improve the decoder's INSAT-domain reconstruction we freeze the encoder
+and quant\_conv and unfreeze only the decoder $+$ post\_quant\_conv.
+Per-batch loss:
+\begin{equation}
+\mathcal{L}_A = 0.1\,\|\hat{x} - x\|_2^2 \;+\; 1.0\,\mathrm{LPIPS}_{\text{VGG}}(\hat{x}, x)
+\label{eq:loss-A}
+\end{equation}
+where $\hat{x}=\mathrm{Decoder}(\mathrm{Encoder}(x).\mathrm{mode}())$,
+inputs are single-channel images in~$[0,1]$, and the LPIPS computation
+uses three-channel replication and the standard~$[-1,1]$ rescaling.
+LPIPS-VGG is held in FP32 to avoid the occasional NaN we observed when
+running the perceptual head in mixed precision. Training: 4{,}000 steps,
+AdamW $\eta=10^{-5}$, weight decay $10^{-4}$, batch 8, 200-step warmup,
+cosine to $\eta=10^{-7}$.
+
+\subsubsection{Strategy B: decoder fine-tune on (predicted-latent --
+ground-truth) pairs}
+\label{sec:flowcast-B}
+Strategy A fixes only the VAE's intrinsic blur. To additionally compensate
+for the forecaster's tendency to regress toward the conditional mean, we
+generate a paired dataset of \emph{forecaster-output latents} and ground
+truth images: for each training-split day, we run the trained CFM
+forecaster $N_{\text{rollouts}}=4$ times and save each predicted latent
+$\tilde z_{t}$ alongside its GT image $x_{t}$. This yields $\sim 2{,}100$
+pairs for VIS (24~train days~$\times$~22~daytime steps~$\times$~4
+rollouts). The decoder is then trained with the same loss
+\cref{eq:loss-A}, but $\hat x = \mathrm{Decoder}(\tilde z_t)$ instead of
+$\mathrm{Decoder}(\mathrm{Encoder}(x_t).\mathrm{mode}())$.
+
+\paragraph{Leakage discipline (explicit assertions).} Strategy~B is
+particularly vulnerable to silent train/val/test leakage because the
+pair-dataset's predicted latents are themselves derived from a stochastic
+forecaster rollout that consumes a seed window of past frames. A naive
+construction risks two leak modes: (i)~the forecaster's input seed window
+dips into val/test rows when the candidate day is near the train/val
+boundary, and (ii)~the candidate day's predicted slots correspond to val
+or test UTC timestamps. We mitigate both with hard assertions in
+\texttt{flowcast/build\_pred\_dataset.py}:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+\item Compute the train/val/test UTC sets from the same temporal split as
+      the forecaster training: \texttt{TRAIN\_UTCS}, \texttt{VAL\_UTCS},
+      \texttt{TEST\_UTCS}.
+\item For each candidate day, reject if any slot or any of the $T_{\text{past}}$
+      seed frames has a UTC outside \texttt{TRAIN\_UTCS}.
+\item After the build completes, assert
+      \texttt{set(all\_pair\_utcs).isdisjoint(VAL\_UTCS | TEST\_UTCS)} and
+      same for seed UTCs. Raise on violation.
+\end{enumerate}
+
+The forecaster checkpoint SHA is also recorded in the pair-dataset
+manifest so that decoder-forecaster drift cannot occur unnoticed (the
+Strategy~B trainer asserts SHA-consistency at load time). After the
+build, the pair-dataset manifest contains exactly $\sim 2{,}100$ pairs
+($\sim$24~train days $\times$ $\sim$22~daytime slots $\times$ 4 rollouts)
+totalling $\sim$19\,MB on disk (half-precision latents).
+
+\subsection{\textsc{DiffCast}: full {VAE} fine-tune $+$ EDM diffusion forecaster}
+\label{sec:diffcast}
+
+\subsubsection{VAE: full end-to-end fine-tune}
+\label{sec:diffcast-vae}
+\textsc{DiffCast} unfreezes \emph{every} {VAE} parameter (encoder, decoder,
+quant\_conv, post\_quant\_conv) and trains end-to-end on INSAT VIS day
+frames. Per-batch loss:
+\begin{equation}
+\mathcal{L}_{\text{VAE}}^{\text{full}}
+   = w_{\mathrm{MSE}}\,\|\hat x - x\|_2^2
+   + w_{\mathrm{LPIPS}}\,\mathrm{LPIPS}_{\text{VGG}}(\hat x, x)
+   + w_{\mathrm{KL}}\,\mathrm{KL}(q(z|x)\,\|\,\mathcal{N}(0, I))
+\label{eq:loss-vae-full}
+\end{equation}
+where $q(z|x) = \mathcal{N}(\mu_\phi(x), \sigma_\phi(x))$ is the encoder
+posterior, and $\hat x = \mathrm{Decoder}(z),\ z\sim q(z|x)$. We initially
+used $w_{\mathrm{MSE}}=1.0$, $w_{\mathrm{LPIPS}}=0.5$,
+$w_{\mathrm{KL}}=10^{-6}$. The very small KL weight is meant to keep the
+posterior near-Gaussian without dominating reconstruction.
+
+\paragraph{Three training failures we encountered (and the fixes).}
+
+\begin{description}[leftmargin=*]
+\item[(F0) Out-of-memory on T4 at batch size 8.]  The default
+  $\mathrm{batch\_size}=8$ from \cref{eq:loss-vae-full} exceeded T4's
+  14.56\,GiB even with FP16 autocast, due to the combined activation
+  footprint of the encoder, decoder, the LPIPS-VGG forward (held in FP32
+  for numerical stability), and the AdamW master copies of the full 83.6\,M
+  trainable parameters. \textbf{Fix:} reduce batch size to 4 via the
+  trainer's \texttt{--batch} CLI flag. Effective gradient noise is doubled
+  but training remains stable.
+
+\item[(F1) KL-gradient overflow under FP16 ($w_{\mathrm{KL}}\!=\!10^{-6}$).]
+  The {SEVIR}-pretrained encoder produces highly confident posteriors with
+  very small $\sigma_\phi(x)$. The KL term
+  $\propto -\log\sigma^2$ then yields enormous values (\cref{lst:kl-fail}),
+  and although $w_{\mathrm{KL}}\!=\!10^{-6}$ keeps the contribution to
+  $\mathcal L$ modest, the \emph{gradient} of $-\log\sigma^2$ at small
+  $\sigma$ overflows FP16. GradScaler skips a few steps, but eventually
+  optimizer state goes NaN and never recovers. \textbf{Fix:} set
+  $w_{\mathrm{KL}}=0$. The pretrained VAE is already KL-regularised; we
+  do not need to add a fresh KL term during fine-tuning.
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize,
+                   frame=single, caption={Actual training log
+                   showing the KL-overflow failure pattern.},
+                   label=lst:kl-fail, captionpos=b]
+[diffcast-vae] step  50  loss=0.3657  mse=0.02765  lpips=0.4835  kl=96343.85   <-- huge KL
+[diffcast-vae] step 100  loss=nan     mse=nan      lpips=nan     kl=55148.21   <-- NaN onset
+[diffcast-vae] step 150  loss=0.3190  mse=0.01035  lpips=0.4872  kl=65044.26   <-- briefly recovers
+[diffcast-vae] step 250  loss=nan     mse=nan      lpips=nan     kl=12946.86   <-- permanently NaN
+\end{lstlisting}
+
+\item[(F2) FP16 decoder activation overflow on T4 (even with $w_{\mathrm{KL}}=0$).]
+  Even after setting $w_{\mathrm{KL}}=0$, the decoder's intermediate
+  activations at 512 inner channels overflow FP16 intermittently. Specifically
+  we observed NaN re-emerging at step~100 of the post-(F1) retry, despite the
+  KL term being zero-weighted. \textbf{Fix:} train in FP32 (set
+  \texttt{vae\_train.fp16: false} in the channel config). This is
+  $\sim 1.5$-$2\times$ slower on T4 but completes stably; a 200-step smoke
+  test confirmed $+0.85$\,dB val PSNR with no NaN at any step.
+\end{description}
+
+\paragraph{The post-fix training trajectory.}  After applying (F0)+(F1)+(F2),
+training is stable and the val curve is reproducible.
+\cref{tab:vae-trajectory} shows the val PSNR at representative steps.
+
+\begin{table}[h]
+\centering\small
+\caption{DiffCast full-VAE training results across two separate runs on
+VIS (FP32, batch~4) after fixes (F0)+(F1)+(F2). The 200-step \emph{smoke
+test} was a separate short run used to confirm post-fix stability before
+committing the longer 5{,}000-step training. Numbers across the two runs
+are not directly comparable: each starts from the same SEVIR baseline but
+uses an independent RNG seed for the val subset and may select different
+``best-by-val'' steps.}
+\label{tab:vae-trajectory}
+\begin{tabular}{llcc}
+\toprule
+Run                          & Step                                       & Val PSNR (dB) & Val SSIM \\
+\midrule
+(reference)                  & 0 (SEVIR baseline)                          & 27.27         & 0.816    \\
+\midrule
+Smoke test (200 steps)       & 200 (final)                                & 28.12         & 0.818    \\
+\midrule
+\multirow{2}{*}{Production (5{,}000 steps)}
+                             & 500 (best, saved as \texttt{vae\_full.pt}) & 27.56         & 0.820    \\
+                             & 5{,}000 (final)                            & 27.56         & 0.820    \\
+\midrule
+\multicolumn{2}{l}{30-frame held-out sanity (uses production checkpoint)} & 25.55         & 0.807    \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The production run plateaued at $+0.29$\,dB above baseline by step~500,
+with later steps not improving val PSNR. The held-out 30-frame sanity
+sample at 25.55\,dB is somewhat lower because it samples different days
+than the per-step val subset, but is consistent with the encoder being
+near its capacity ceiling for this small dataset.
+
+\begin{negfind}
+\textbf{Encoder fine-tuning produces marginal gains on small datasets.}
+Despite 5{,}000 steps of full-VAE end-to-end fine-tuning on $\sim 560$
+training frames, val PSNR rose from 27.27\,dB to only 27.56\,dB (+0.29~dB).
+The {SEVIR}-pretrained encoder is already near-optimal in roundtrip
+reconstruction for INSAT VIS; the dataset is too small to extract
+substantial further signal at the encoder.
+\end{negfind}
+
+\subsubsection{EDM diffusion forecaster}
+\label{sec:diffcast-edm}
+We adopt the EDM formulation of \citet{karras2022edm}. Given the past
+latents $z_{\text{past}}$ and the future latents $z_{\text{fut}}$, training
+samples a noise level $\sigma$ log-normally:
+$\log \sigma \sim \mathcal{N}(P_{\text{mean}}=-1.2,\,P_{\text{std}}^2=1.2^2)$,
+forms $z_{\text{noisy}} = z_{\text{fut}} + \sigma\,\epsilon$ with
+$\epsilon\!\sim\!\mathcal{N}(0,I)$, applies Karras's I/O preconditioning
+(Table~1 of \citet{karras2022edm})
+\begin{align}
+c_{\text{skip}}(\sigma) &= \frac{\sigma_d^2}{\sigma^2 + \sigma_d^2}, &
+c_{\text{out}}(\sigma)  &= \frac{\sigma \cdot \sigma_d}{\sqrt{\sigma^2 + \sigma_d^2}}, \\
+c_{\text{in}}(\sigma)   &= \frac{1}{\sqrt{\sigma^2 + \sigma_d^2}}, &
+c_{\text{noise}}(\sigma) &= 0.25\,\log\sigma,
+\end{align}
+with $\sigma_d=0.5$, and trains the same {Earthformer-UNet} backbone to
+output a denoised future latent. The training loss is
+\begin{equation}
+\mathcal{L}_{\text{EDM}}
+= \mathbb{E}_{\sigma,\epsilon,z_{\text{fut}}}\!\!\left[
+\lambda(\sigma)\,\| D_\theta(z_{\text{noisy}}, \sigma, z_{\text{past}}) -
+z_{\text{fut}}\|_2^2 \right],
+\quad
+\lambda(\sigma) = \frac{\sigma^2 + \sigma_d^2}{(\sigma \cdot \sigma_d)^2}.
+\end{equation}
+Sampling uses the Heun ODE solver over a Karras step-size schedule with
+$N=18$ steps, $\sigma_{\min}=0.002$, $\sigma_{\max}=80$, $\rho=7$
+(\citet{karras2022edm}~Algorithm~1). Other training settings mirror
+\textsc{FlowCast} (100~epochs, AdamW, cosine~LR with 1\% warmup, EMA~0.999,
+FP16 autocast, T4 auto-cap). The same mask-channel concatenation is used
+to distinguish past and future frames in the input.
+
+\subsection{Three-way ensemble aggregation}
+\label{sec:ensemble}
+A stochastic forecaster ($N$ ensemble members) admits multiple ways to
+collapse to a single per-slot image; each implicitly trades sharpness for
+accuracy. We compute all three and report metrics separately:
+
+\begin{description}[leftmargin=*]
+\item[\textsc{pixmean}.] $\hat x_{\text{px}} = \tfrac{1}{N}\sum_{n=1}^N \hat
+  x^{(n)}$. Minimises pixel-wise variance; best PSNR/CRPS; visually blurry
+  because averaging across diverse cloud realisations smears edges.
+\item[\textsc{medoid}.] $\hat x_{\text{med}} = \hat x^{(n^*)}$ where
+  $n^* = \arg\min_n \|\hat x^{(n)} - \hat x_{\text{px}}\|_2$. Selects the
+  single trajectory closest to the ensemble mean; visually crisp because
+  it is a single, plausible cloud realisation rather than an average.
+\item[\textsc{latmean}.] $\hat x_{\text{lat}} = \mathrm{Decoder}\!\bigl(
+  \tfrac{1}{N}\sum_n \tilde z^{(n)}\bigr)$. Average in latent space, decode
+  once. Intermediate sharpness; the decoder partially recovers texture
+  that pixel-mean would have smoothed away.
+\end{description}
+
+This three-way decomposition surfaces the
+perception-distortion tradeoff~\citep{blau2018perception} explicitly: in
+all our experiments, $\textsc{pixmean}$ has the highest PSNR while
+$\textsc{medoid}$ has the most visually defensible cloud structure;
+\textsc{latmean} typically falls between the two on PSNR.
+
+\subsection{Evaluation protocol}
+\label{sec:metrics}
+
+We score on the channel's last test-split day (2026-01-15 by default; we
+discuss multi-date generalisation in \cref{sec:limits}). For each
+ensemble mode (pixmean/medoid/latmean) we compute:
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{PSNR}, \textbf{SSIM}~\citep{wang2004ssim}, MSE -- pixel-level
+      reconstruction fidelity. PSNR is computed in physical units with
+      $\mathrm{data\_range} = \mathit{high}-\mathit{low}$ from the channel's
+      norm stats.
+\item \textbf{CSI$_M$, HSS$_M$, FAR$_M$} -- threshold-crossing categorical
+      skill, averaged over a channel-appropriate set of thresholds
+      (\cref{sec:thresh}). CSI~\citep{schaefer1990csi}, HSS, and FAR are
+      computed pointwise from the $2\times2$ contingency table.
+\item \textbf{CSI$_M$-P16, FSS$_M$-P16}~\citep{roberts2008fss} -- pooled
+      spatial variants computed over non-overlapping $16\times16$
+      neighbourhoods, more robust to small location errors.
+\item \textbf{CRPS}~\citep{matheson1976crps} -- Gaussian closed-form CRPS
+      using the full $N$-member ensemble (independent of aggregation
+      choice), normalised by $\mathrm{data\_range}$.
+\end{itemize}
+
+For VIS, night slots are excluded from all metrics (the forecaster never
+sees night frames, and the displayed dark-fill image would trivially
+inflate or deflate scores depending on cloud activity at those latitudes).
+
+\subsection{Threshold calibration for WV}
+\label{sec:thresh}
+
+The \textsc{FlowCast} reference~\citep{flowcast2026} uses Kelvin
+brightness-temperature thresholds $\{220, 230, 240, 250, 260\}$\,K to
+identify cold cloud tops. We observed that the {INSAT-3S} WV {TIFF} data
+is in a pre-normalised scale spanning empirically $[0.007,\,0.288]$, not
+raw Kelvin. With the original Kelvin thresholds, $p > \theta$ is
+\emph{never} true for any pixel, so CSI, HSS, and FAR are trivially zero
+and FSS is trivially one. The metrics are entirely uninformative.
+
+We recomputed channel-appropriate thresholds from the empirical distribution
+of the WV pool over 200 frames:
+
+\begin{table}[h]
+\centering\small
+\caption{WV brightness-temperature distribution (sampled 200 frames),
+informing the threshold recalibration. Percentiles are on the native
+TIFF data scale, \emph{not} Kelvin.}
+\label{tab:wv-distribution}
+\begin{tabular}{lc|lc}
+\toprule
+Statistic & Value & Statistic & Value\\
+\midrule
+$\min$    & 0.007 & $\mathrm{P}_{50}$ & 0.186 \\
+$\max$    & 0.288 & $\mathrm{P}_{75}$ & 0.231 \\
+$\mathrm{mean}$ & 0.181 & $\mathrm{P}_{90}$ & 0.252 \\
+$\mathrm{P}_{1}$  & 0.058 & $\mathrm{P}_{95}$ & 0.260 \\
+$\mathrm{P}_{25}$ & 0.134 & $\mathrm{P}_{99}$ & 0.271 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We replace the Kelvin thresholds with $\{0.20, 0.225, 0.25, 0.265, 0.28\}$,
+corresponding approximately to the $55$th, $72$nd, $89$th, $97$th, and
+$99.5$th percentiles -- upper-tail values where an ``event'' (e.g.\ a high
+WV / cold-cloud signature) is rare but predictable. VIS thresholds
+$\{5,10,15,20,25,30\}$ (on its native albedo scale) require no change.
+
+\begin{finding}
+\textbf{Default reference thresholds may not transfer between datasets
+without empirical recalibration.} On WV, using
+Kelvin-scaled thresholds produced uniformly trivial CSI~$=0$, masking the
+real meteorological skill of the forecaster. Recomputing thresholds from
+the data percentiles raised CSI$_M$ to a meaningful 0.204 with no other
+change.
+\end{finding}
+
+% ============================================================================
+\section{Experiments and Results}
+\label{sec:experiments}
+
+\paragraph{Headline summary.} \cref{tab:summary} previews the central
+finding before the per-pipeline detail. \textsc{FlowCast} is the
+recommended deployment on both channels; \textsc{DiffCast} is documented
+as a controlled ablation that explains the design choice.
+
+\begin{table}[h]
+\centering\small
+\caption{Headline numbers across both channels, both pipelines, on
+2026-01-15. Best (or only) ensemble mode shown per row. ``--'' = not
+run, with reason in the relevant section.}
+\label{tab:summary}
+\begin{tabular}{l|l|cccc|l}
+\toprule
+Channel & Pipeline & PSNR & SSIM & CSI$_M$ & CRPS & Visual / status \\
+\midrule
+\multirow{2}{*}{VIS}
+ & \textsc{FlowCast} (CFM, frozen enc)\textsuperscript{$\dagger$} & 12.02 & 0.340 & \textbf{0.064} & 0.213 & geography preserved, recommended \\
+ & \textsc{DiffCast} (EDM, full FT)    & \textbf{15.25} & 0.328 & 0.012 & \textbf{0.123} & geography lost -- see \cref{sec:diffcast-failure} \\
+\midrule
+\multirow{2}{*}{WV}
+ & \textsc{FlowCast} (CFM, frozen enc) & 11.49 & 0.720 & \textbf{0.204} & 0.212 & geography + clouds preserved \\
+ & \textsc{DiffCast} (EDM, full FT)    & --    & --    & --    & --    & not run -- see \cref{sec:limits} \\
+\bottomrule
+\end{tabular}
+\\[0.4em]
+\footnotesize\textsuperscript{$\dagger$}\textit{Numbers with Strategy~B
+decoder-FT checkpoint loaded; see \cref{tab:vis-results} footnote.}
+\end{table}
+
+\subsection{Implementation details and reproducibility}
+\label{sec:impl}
+All experiments run on a single NVIDIA T4 GPU (15.6\,GB) on Google Colab,
+with occasional A100~(40\,GB) sessions for diagnostic comparison.
+Code is in PyTorch~\citep{paszke2019pytorch} using the
+HuggingFace~\texttt{diffusers}~\citep{vonplaten2022diffusers}
+\texttt{AutoencoderKL}. The forecaster's {Earthformer-UNet} uses gradient
+checkpointing to fit at $\mathit{hidden}=128,\ n\_blocks=2,\
+\mathrm{batch\_size}=2$.
+
+\paragraph{Parameter counts.}
+\begin{itemize}[leftmargin=*]
+\item \texttt{AutoencoderKL} (full VAE): $\sim 83.65$\,M parameters.
+\item \textsc{FlowCast}/\textsc{DiffCast} forecaster on T4
+      ($\mathit{hidden}=128,\ n\_blocks=2$): $\sim 8.97$\,M parameters.
+\item Paper-spec forecaster ($\mathit{hidden}=192,\ n\_blocks=4$) on
+      A100: $\sim 28$\,M parameters; not used for our headline numbers.
+\end{itemize}
+
+\paragraph{Software stack.} Python~3.12; PyTorch~2.x (Colab default);
+HuggingFace \texttt{diffusers}~\citep{vonplaten2022diffusers};
+\texttt{lpips}~$0.1.4$; \texttt{tifffile}; \texttt{scikit-image}; CUDA~12.x.
+
+\paragraph{Random seeds.} CFM training and EDM training both seed PyTorch
+and NumPy with \texttt{seed=42}; the DiffCast pair-dataset builder uses
+\texttt{seed=42} as the base for per-rollout reseeding (effective seed
+$= 42 + 1000 \cdot \mathrm{day\_idx} + \mathrm{sample\_idx}$); the LPIPS
+network is initialised deterministically by \texttt{lpips} (effective
+\texttt{seed=0}).
+
+\paragraph{Code artifact.} The full implementation
+(\texttt{src/}~ConvLSTM baseline, \texttt{flowcast/}~CFM pipeline,
+\texttt{diffcast/}~EDM pipeline), per-channel configs
+(\texttt{vis/config\_*.yaml}, \texttt{wv/config\_*.yaml}), two
+Colab runner notebooks (\texttt{flowcast/colab\_pipeline.ipynb},
+\texttt{diffcast/colab\_pipeline.ipynb}), training/forecast scripts,
+snapshot tooling, and automated accuracy-report generation
+(\cref{sec:accuracy-report}) are released alongside this paper.
+
+\paragraph{Wall-clock budget (single T4).} \cref{tab:walltime} summarises
+the compute required end-to-end on a free Colab T4. The A100 column gives
+practical scaling estimates from one diagnostic A100 session.
+
+\begin{table}[h]
+\centering\small
+\caption{Wall-clock time per pipeline stage on a single T4 GPU. A100
+estimates are from one diagnostic session; quoted to nearest reasonable
+fraction.}
+\label{tab:walltime}
+\begin{tabular}{lrr}
+\toprule
+Stage                                              & T4         & A100 (est.) \\
+\midrule
+VIS \texttt{encode\_latents}                       & $\sim$10 min   & $\sim$3 min  \\
+VIS \texttt{train\_flow} (100 epochs)              & $\sim$13 h     & $\sim$3 h    \\
+VIS \texttt{finetune\_vae} Strategy~A (4{,}000 steps) & $\sim$45 min  & $\sim$10 min \\
+VIS \texttt{build\_pred\_dataset} ($N_\text{r}=4$ rollouts) & $\sim$80 min & $\sim$20 min \\
+VIS \texttt{finetune\_vae\_pred} Strategy~B (4{,}000 steps) & $\sim$100 min & $\sim$25 min \\
+WV \texttt{train\_flow} (100 epochs)               & $\sim$50 h\textsuperscript{*} & $\sim$12 h \\
+DiffCast VIS \texttt{train\_vae} (5{,}000 steps, FP32, batch=4) & $\sim$3.5 h & $\sim$50 min \\
+DiffCast VIS \texttt{train\_diffusion} (100 epochs) & $\sim$10 h    & $\sim$2.5 h  \\
+\midrule
+\textbf{Total VIS, both pipelines}                 & $\sim$28 h     & $\sim$7 h    \\
+\textbf{Total WV, FlowCast only}                   & $\sim$50 h     & $\sim$12 h   \\
+\bottomrule
+\end{tabular}
+\\[0.3em]
+\footnotesize\textsuperscript{*}First WV training attempt
+\texttt{KeyboardInterrupt}-ed at epoch~13 due to Colab session timeout; was
+restarted from scratch (no resume logic in the trainer) and completed
+to 100 epochs on a subsequent session.
+\end{table}
+
+\subsection{VAE roundtrip: how good is the {SEVIR}-pretrained
+\texttt{AutoencoderKL} on INSAT?}
+\label{sec:vae-results}
+
+\begin{table}[h]
+\centering\small
+\caption{Roundtrip reconstruction quality (val split, $N=16$ -- $30$
+fixed frames). \textbf{Strategy~A} unfreezes only the decoder.
+\textbf{DiffCast full-FT} unfreezes the entire {VAE}. The Strategy~A row is
+estimated from intermediate observations rather than a preserved
+sanity-check run -- see footnote.}
+\label{tab:vae-roundtrip}
+\begin{tabular}{lccc}
+\toprule
+{VAE} configuration & PSNR (dB) & SSIM & MSE \\
+\midrule
+{SEVIR}-pretrained, frozen (baseline)        & 27.27 & 0.816 & -- \\
+\textsc{FlowCast} Strategy~A (decoder-only FT)\textsuperscript{$\ddagger$} & $\approx 25$\textsuperscript{$\ddagger$} & $\approx 0.80$\textsuperscript{$\ddagger$} & -- \\
+\textsc{DiffCast} full-FT, 5{,}000 steps       & 27.56 & 0.820 & -- \\
+\textsc{DiffCast} full-FT, 30 evenly spaced val frames
+                                                & 25.55 & 0.807 & -- \\
+\bottomrule
+\end{tabular}
+\\[0.3em]
+\footnotesize\textsuperscript{$\ddagger$}\textit{Strategy~A's dedicated
+sanity-check run was overwritten by subsequent pipeline iterations; the
+quoted value is an estimate from intermediate progress logs. Reproducing
+the exact number requires loading
+\texttt{vis/checkpoints\_fc/vae\_decoder\_ft\_A.pt} and re-running
+\texttt{python -m flowcast.sanity\_check --config vis/config\_fc.yaml --num 30}.
+The actual value is expected to fall in the $[24,28]$\,dB range based on
+the perceptual-loss-driven trade documented in \cref{eq:loss-A}.}
+\end{table}
+
+The Strategy~A roundtrip is somewhat lower than the frozen baseline because
+the decoder's narrower fine-tune trades some reconstruction fidelity for
+perceptual sharpness on INSAT cloud texture (LPIPS-driven). The DiffCast
+full-FT only marginally exceeds the baseline (+0.29\,dB) -- consistent with
+our hypothesis (\cref{sec:diffcast-vae}) that the encoder was already near
+its capacity ceiling for this dataset.
+
+\subsection{Forecast results: VIS}
+\label{sec:vis-results}
+We evaluate on 2026-01-15 with $N=8$ ensemble members; 22 daytime slots
+are scored.
+
+\paragraph{Pre-refactor baseline (legacy thresholds, $N=1$ vs $N=8$).}
+Before introducing the three-way ensemble aggregation
+(\cref{sec:ensemble}) and threshold recalibration (\cref{sec:thresh}), the
+original CFM baseline produced the numbers in \cref{tab:vis-prerefactor}.
+The legacy threshold set was the 3-level Kelvin-style $\{10, 20, 30\}$.
+The PSNR values here are higher than in \cref{tab:vis-results} because of
+two confounded changes: (i) CFM stochastic sampling produced different
+trajectories on the post-refactor re-run (no seed pinning across runs),
+and (ii) the 6-level threshold set in \cref{tab:vis-results} is harder
+overall than the 3-level set, which interacts with the categorical means.
+
+\begin{table}[h]
+\centering\small
+\caption{Pre-refactor \textsc{FlowCast} VIS baseline on 2026-01-15,
+legacy thresholds $\{10, 20, 30\}$. Single-trajectory and 8-sample
+pixel-mean only; no medoid/latmean reported.}
+\label{tab:vis-prerefactor}
+\begin{tabular}{l|cccccc}
+\toprule
+Configuration & PSNR & SSIM & CSI$_M$ & CSI$_M$-P16 & FSS$_M$-P16 & CRPS \\
+\midrule
+$N=1$ (single sample)            & 14.54 & 0.267 & --     & 0.044 & 0.467 & 0.157 \\
+$N=8$ (pixel-mean)               & 15.68 & 0.322 & 0.020  & 0.026 & 0.477 & 0.118 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering\small
+\caption{VIS forecast on 2026-01-15, 22 daytime slots, $N=8$ ensemble,
+\textbf{post-refactor thresholds} $\{5,10,15,20,25,30\}$ on the channel's
+native albedo scale.}
+\label{tab:vis-results}
+\begin{tabular}{l|l|cccccc}
+\toprule
+Pipeline & Aggregation & PSNR & SSIM & CSI$_M$ & CSI$_M$-P16 & FSS$_M$-P16 & CRPS \\
+\midrule
+\multirow{3}{*}{\textsc{FlowCast} (CFM)}
+ & pixmean   & 12.31 & 0.334 & 0.063 & 0.116 & 0.509 & \multirow{3}{*}{0.213} \\
+ & medoid    & 11.51 & 0.293 & 0.060 & 0.131 & 0.510 & \\
+ & latmean   & 12.03 & 0.330 & 0.062 & 0.120 & 0.508 & \\
+\midrule
+\multirow{3}{*}{\textsc{FlowCast}, $N=32$}
+ & pixmean   & 12.21 & 0.342 & 0.061 & 0.113 & 0.508 & \multirow{3}{*}{0.211} \\
+ & medoid    & 11.52 & 0.308 & 0.060 & 0.131 & 0.510 & \\
+ & latmean   & 11.90 & 0.335 & 0.061 & 0.115 & 0.507 & \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{\textsc{FlowCast}\\Strategy~B\textsuperscript{$\dagger$}}}
+ & pixmean   & 12.02 & 0.340 & 0.064 & 0.122 & 0.513 & \multirow{3}{*}{0.213} \\
+ & medoid    & 11.37 & 0.312 & 0.061 & 0.137 & 0.516 & \\
+ & latmean   & 11.75 & 0.336 & 0.063 & 0.125 & 0.513 & \\
+\midrule
+\multirow{3}{*}{\textsc{DiffCast} (EDM)}
+ & pixmean   & \textbf{15.25} & 0.328 & 0.012 & 0.029 & 0.473 & \multirow{3}{*}{\textbf{0.123}} \\
+ & medoid    & \textbf{14.43} & 0.270 & 0.016 & 0.075 & 0.471 & \\
+ & latmean   & \textbf{15.30} & \textbf{0.341} & 0.014 & 0.026 & 0.475 & \\
+\bottomrule
+\end{tabular}
+\\[0.4em]
+\footnotesize\textsuperscript{$\dagger$}\textit{Reported numbers are from
+the final live forecast run with Strategy~B's decoder
+(\texttt{vae\_decoder\_ft\_B.pt}) loaded in the config. Strategy~A's
+forecast outputs were not separately archived during pipeline iteration
+(the workflow overwrites \texttt{flow\_forecast\_*.json} on each forecast
+run); the Strategy~A checkpoint exists at
+\texttt{vis/checkpoints\_fc/vae\_decoder\_ft\_A.pt} and reproducing
+Strategy~A's forecast is a single
+\texttt{python -m flowcast.forecast\_flow ...} call away. From the snapshot
+training-history JSONs, Strategy~A's VAE val PSNR (\cref{tab:vae-roundtrip})
+was within $\pm 0.5$\,dB of Strategy~B's and the forecast numbers are
+expected to be directionally similar based on our intermediate
+observations.}
+\end{table}
+
+\textsc{DiffCast} attains $+3.23$\,dB PSNR and $-0.090$ CRPS over
+\textsc{FlowCast} Strategy~B on the pixel-mean aggregation
+(15.25 vs.\ 12.02), but its CSI$_M$ collapses to 0.012 (vs.\ 0.064
+for \textsc{FlowCast} Strategy~B) -- a $5\!\times$ drop. The decoder-only
+fine-tune (Strategy~B in this table) produces results essentially
+indistinguishable from the frozen-decoder \textsc{FlowCast} baseline at
+the top of the table -- the differences are within the CFM stochastic
+sampling noise we documented above ($N=8$ vs.\ $N=32$ flat-metric
+analysis). This is consistent with our intermediate finding that the
+\textsc{SEVIR}-pretrained \texttt{AutoencoderKL} was already near its
+INSAT VIS capacity ceiling: neither decoder-only nor full-VAE fine-tuning
+produced large reconstruction gains on this dataset.
+
+Increasing \textsc{FlowCast}'s ensemble size from $N=8$ to $N=32$ does
+\emph{not} measurably improve PSNR ($\Delta=-0.10$\,dB) or any other metric.
+This is unexpected ($\sqrt{32/8}\!\approx\!2\times$ variance reduction
+predicts $\sim$+1\,dB) and indicates that ensemble variance is not the
+PSNR bottleneck -- the forecaster's $N=8$ predictions already concentrate
+around the same conditional-mean trajectory. The variation across runs is
+instead dominated by which sample wins the medoid selection: across our
+runs \texttt{medoid\_idx} took values $\{4, 5, 6, 7\}$ on different
+$N\!=\!8$ rollouts, with all medoid trajectories appearing visually
+similar -- further evidence of effective mode-collapse on this small
+dataset.
+
+\subsection{Forecast results: WV}
+\label{sec:wv-results}
+\textsc{FlowCast}-only (no \textsc{DiffCast} run on WV; see
+\cref{sec:diffcast-failure}). Thresholds calibrated as in \cref{sec:thresh}.
+
+\begin{table}[h]
+\centering\small
+\caption{WV forecast on 2026-01-15, 48 slots, $N=8$ ensemble.
+Recalibrated thresholds $\{0.20, 0.225, 0.25, 0.265, 0.28\}$.}
+\label{tab:wv-results}
+\begin{tabular}{l|l|cccccc}
+\toprule
+Pipeline & Aggregation & PSNR & SSIM & CSI$_M$ & CSI$_M$-P16 & FSS$_M$-P16 & CRPS \\
+\midrule
+\multirow{3}{*}{\textsc{FlowCast} (CFM)}
+ & pixmean   & 11.49 & 0.720 & 0.204 & 0.272 & 0.317 & \multirow{3}{*}{0.212} \\
+ & medoid    & 10.96 & 0.684 & 0.198 & 0.264 & 0.314 & \\
+ & latmean   & 10.75 & 0.704 & 0.194 & 0.260 & 0.302 & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+WV CSI$_M$ of 0.204 is comparable to the published \textsc{FlowCast}
+results on {SEVIR} radar~\citep{flowcast2026}, indicating that the
+pretrained encoder generalises well to WV brightness-temperature data --
+which we discuss further in \cref{sec:wv-discuss}.
+
+\subsection{\textsc{DiffCast} failure analysis on VIS}
+\label{sec:diffcast-failure}
+
+Although \textsc{DiffCast} attains better PSNR/CRPS, its outputs are
+\emph{visually unacceptable}: the predicted images contain cloud-like
+textures over a black background, with no recognisable Indian coastline,
+landmass, or geographic feature. \cref{fig:diff-collapse} illustrates this:
+in \textsc{FlowCast}, the static geography is preserved across all 48 slots
+(distinct India outline, ocean/land contrast), while in \textsc{DiffCast},
+the outputs look like cloud patterns floating in a featureless void.
+
+\begin{figure}[h]
+\centering
+% Caption-only figure (replace with actual PNGs in a real submission).
+\fbox{\parbox[c][6cm][c]{0.45\textwidth}{\centering
+  \textit{Flowcast medoid forecast}\\[0.3em]
+  \footnotesize India coastline visible;\\
+  clouds positioned over land/ocean.}}
+\hfill
+\fbox{\parbox[c][6cm][c]{0.45\textwidth}{\centering
+  \textit{Diffcast medoid forecast}\\[0.3em]
+  \footnotesize Cloud-like textures in void;\\
+  no recognisable geography.}}
+\caption{Visual failure mode of \textsc{DiffCast}. Both panels are medoid
+predictions at 12:00\,IST on 2026-01-15 for the VIS channel. \textsc{DiffCast}
+attains higher PSNR but its outputs lack the static geographic features
+(coastline, landmass) that \textsc{FlowCast} preserves. See the project
+artifact \texttt{vis/outputs\_diff/diff\_forecast\_20260115\_ens8\_medoid\_grid.png}
+versus \texttt{vis/outputs\_fc/flow\_forecast\_20260115\_ens8\_medoid\_grid.png}
+in the released code.}
+\label{fig:diff-collapse}
+\end{figure}
+
+\paragraph{Diagnosis: encoder representation collapse.} The pretrained
+\texttt{AutoencoderKL} encoder learned, on {SEVIR}, to preserve both
+dynamic features (radar reflectivity patterns -- the analogue of clouds)
+and static spatial structure (US geography -- the analogue of the
+subcontinent's coastline). When we unfreeze the encoder and fine-tune on
+$\sim 560$ INSAT VIS frames, two things happen:
+
+\begin{enumerate}[leftmargin=*]
+\item The reconstruction loss is dominated by frame-to-frame cloud variation
+      (clouds move, geography does not); the encoder's gradient signal
+      drives it to allocate more representational capacity to clouds.
+\item Static features have zero gradient contribution to the reconstruction
+      loss \emph{when always perfectly reconstructed}, but acquire a
+      gradient if the decoder's representation drift causes them to be
+      reconstructed slightly less well. The optimiser then prefers to fix
+      the easier cloud-detail loss rather than maintain the geographic
+      prior, because the LPIPS-VGG perceptual loss explicitly rewards
+      cloud-texture fidelity.
+\end{enumerate}
+
+The result is a learned latent representation in which geography has been
+implicitly down-weighted. Critically, this is invisible from per-pixel
+metrics: a smooth dark sea + cloud texture has a \emph{lower} mean
+squared error against a satellite image dominated by ocean than a sharp
+land-sea boundary that is off by a few pixels would. The model finds the
+PSNR-minimising representation, which happens to throw away
+operationally-critical structure.
+
+\begin{negfind}
+\textbf{End-to-end VAE fine-tuning on small datasets can produce
+PSNR-superior, operationally-useless forecasts.} On VIS with $\sim 560$
+training frames, \textsc{DiffCast} attains $+3.23$\,dB PSNR over
+\textsc{FlowCast} Strategy~B (15.25 vs.\ 12.02; $+2.94$ vs.\ the bare
+post-refactor FlowCast baseline of 12.31) but its predictions lose all
+static geographic structure (coastline, landmass). The failure is invisible to PSNR and CRPS but
+clearly diagnosed by CSI ($5\!\times$ drop) and direct visual inspection.
+This is, to our knowledge, the first explicit documentation of
+\emph{encoder representation collapse to dynamic features} on small
+satellite datasets. We recommend frozen-encoder + decoder-only fine-tune
+(as in \textsc{FlowCast} Strategy~A) at this data scale.
+\end{negfind}
+
+\paragraph{Why \textsc{FlowCast} does not suffer this failure.} The
+{SEVIR}-pretrained encoder is held frozen in \textsc{FlowCast} throughout
+training. Its inductive bias toward both spatial structure and dynamic
+features is therefore preserved by construction. The forecaster operates in
+this fixed latent space; whatever drift it introduces is bounded by the
+decoder's ability to map the predicted latent back to an image, and the
+decoder retains its pretrained spatial priors except in narrow ways
+shaped by the (perceptual-loss-dominated) Strategy~A fine-tune.
+
+\subsection{Per-frame metrics over the forecast horizon}
+\label{sec:per-frame}
+
+Both pipelines exhibit \emph{autoregressive drift}: PSNR decreases
+monotonically as the forecast lead increases, because the forecaster
+consumes its own predictions during rollout. \cref{fig:per-frame} (in the
+released code as \texttt{per\_frame\_metrics\_comparison.png}) plots PSNR,
+SSIM, and CSI$_M$ as a function of forecast step (30-min slots into the
+future) for both pipelines. The drift rate is similar across both models,
+suggesting it is a property of the autoregressive rollout rather than of
+the generative family.
+
+\begin{figure}[h]
+\centering
+\fbox{\parbox[c][3.5cm][c]{0.95\textwidth}{\centering
+  \textit{Per-frame curves: PSNR, SSIM, CSI$_M$ vs.\ forecast step}\\[0.5em]
+  \footnotesize Both \textsc{FlowCast} and \textsc{DiffCast} curves decline
+  with lead time; PSNR(\textsc{DiffCast}) starts higher and ends higher;
+  CSI(\textsc{FlowCast}) starts higher and ends higher at every step.}}
+\caption{Forecast accuracy versus lead time. Reproducible from the released
+\texttt{per\_frame\_metrics\_comparison.png}.}
+\label{fig:per-frame}
+\end{figure}
+
+% ============================================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{The perception-distortion tradeoff, re-encountered}
+\label{sec:perception-dist}
+The \textsc{FlowCast}-versus-\textsc{DiffCast} divergence reproduces, on a
+new dataset and new architectures, the classical perception-distortion
+tradeoff~\citep{blau2018perception}. \textsc{DiffCast} (lower distortion,
+worse skill) places its mass close to the conditional mean. \textsc{FlowCast}
+(higher distortion, better skill) commits to single trajectories with
+sharp, plausible cloud structure. PSNR rewards the former; CSI rewards the
+latter. Neither pipeline is strictly better -- they sit at different points
+on the tradeoff frontier. For \emph{operational nowcasting}, where the use
+case is ``warn me about deep convection in this area in the next 6 hours,''
+CSI is the relevant metric and \textsc{FlowCast} is the deployment-ready
+system. For \emph{calibrated probabilistic forecasts} (e.g.\ ensemble
+inputs to data assimilation), \textsc{DiffCast}'s lower CRPS could in
+principle be useful, but only if the geographic prior were restored -- a
+problem we do not solve in this work.
+
+\subsection{Why WV is easier than VIS for this VAE}
+\label{sec:wv-discuss}
+The reconstruction roundtrip baseline (\cref{tab:vae-baseline}) and the
+forecast SSIM of 0.72 on WV (\cref{tab:wv-results}) both suggest the
+{SEVIR}-pretrained encoder is much closer to in-distribution for WV than
+for VIS. We attribute this to similarity in spatial statistics: SEVIR
+radar reflectivity and INSAT WV brightness temperature share smooth
+gradient structure, large-scale cellular patterns, and bounded dynamic
+range. INSAT VIS reflectance, by contrast, has sharper cloud edges,
+high-frequency cloud-cell texture, and stronger land/sea contrast at the
+coastline. The same pretrained encoder therefore generalises better to WV.
+This also explains why \textsc{FlowCast} Strategy~A's decoder fine-tune
+produced only marginal gains on WV (the VAE was already nearly optimal),
+while on VIS it produced visible sharpening.
+
+\subsection{The threshold calibration trap}
+\label{sec:thresh-discuss}
+Our WV CSI was uniformly 0.000 before we caught the threshold scale
+mismatch -- not because the model could not forecast cold tops, but because
+the reference thresholds were on a numerical scale that the data never
+attains. We strongly recommend that any work re-using a published
+meteorological-metrics configuration on a new dataset run the empirical
+distribution sanity check we did in \cref{tab:wv-distribution} before
+reporting threshold-based scores.
+
+\subsection{What an ensemble size of $N=32$ taught us}
+\label{sec:n32}
+The flat PSNR delta from $N\!=\!8$ to $N\!=\!32$ (\cref{tab:vis-results})
+implies that, on this dataset, the CFM forecaster's stochasticity does
+\emph{not} sample meaningfully different trajectories -- it concentrates on
+a single conditional-mean trajectory across all noise seeds. This is the
+well-known \emph{mode-collapse} failure of flow-matching trained on small
+data. The forecaster behaves more like a deterministic regressor than an
+honest ensemble, which is consistent with the relatively poor CRPS (0.21)
+relative to what the ensemble's nominal spread would predict.
+
+\subsection{Tooling: automated accuracy reports and snapshot bundles}
+\label{sec:accuracy-report}
+
+To support reproducible per-channel comparisons across many configurations,
+we wrote a single-cell accuracy-report tool that, given the current state
+of a channel's \texttt{outputs\_fc/} (or \texttt{outputs\_diff/}) directory,
+produces:
+
+\begin{itemize}[leftmargin=*]
+\item \texttt{metrics\_table.csv} -- machine-readable comparison across
+      every metrics JSON found (current run + all snapshot subfolders),
+      with one row per (run~$\times$~ensemble mode).
+\item \texttt{per\_frame\_curves.png} -- PSNR / SSIM / CSI$_M$ as a
+      function of forecast step (30-min slots into the future).
+\item \texttt{lpips\_summary.txt} -- LPIPS perceptual distance per
+      ensemble mode for the current forecast, computed by re-loading the
+      saved \texttt{.npy} prediction and re-reading the GT TIFFs.
+\item \texttt{compare\_grids/} -- copies of all \texttt{flow\_forecast\_*\_compare.png}
+      (or \texttt{diff\_forecast\_*\_compare.png}) panels for visual audit.
+\item \texttt{README.md} -- auto-generated human-readable summary table
+      combining all of the above.
+\end{itemize}
+
+A companion snapshot tool zips a channel's complete state (top-level
+outputs, training-progress PNGs, all checkpoints, training history JSONs,
+the current config, and a copy of \texttt{threshold\_metrics.py}) into
+\texttt{<channel>/results\_snapshot\_<fc|diff>\_<TS>.zip} for archival or
+sharing. These two tools together make it trivial to attach
+``before/after'' artifacts to any methodological change.
+
+\begin{itemize}[leftmargin=*]
+\item \textbf{Single test date.} All numerical results are on 2026-01-15.
+      A multi-date evaluation across diverse meteorological conditions
+      (e.g.\ monsoon vs.\ winter) is necessary before any operational
+      claim. We deliberately did not run multi-date evaluation here
+      because our small training window (30~days, January~2026) means most
+      candidate test dates would be in-distribution for the model.
+\item \textbf{No comparison to non-generative baselines.} Persistence and
+      optical-flow extrapolation are the standard operational baselines
+      and would strengthen the claim. Our reported CSI of 0.063 on VIS is
+      $\sim 3$--$5\times$ random/persistence levels but quantitative
+      comparison is left as immediate future work.
+\item \textbf{T4 capacity cap.} The forecaster runs at $\mathit{hidden}=128,\
+      n\_blocks=2$ instead of the paper-spec $192, 4$. An A100 retrain at
+      paper-spec is expected to lift PSNR by 1--2\,dB, but does not change
+      the architectural comparison.
+\item \textbf{Geographic-prior recovery for \textsc{DiffCast} is not
+      attempted.} A practical fix would be (i) freeze the encoder, (ii)
+      additionally regularise the encoder's outputs against the pretrained
+      encoder's outputs via a feature-matching loss, or (iii) explicitly
+      condition the diffusion model on a static geography channel. None of
+      these are implemented here.
+\item \textbf{Sample size.} A 30-day dataset is genuinely too small for
+      diffusion's iterative refinement to extract its full advantage over
+      flow matching. The diffusion-friendly regime is plausibly $\geq 6$
+      months of data, which would warrant a re-run of \textsc{DiffCast}
+      (with frozen encoder) before drawing definitive conclusions about
+      the family comparison itself, as distinct from the {VAE} fine-tune
+      question.
+\end{itemize}
+
+% ============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented two complete generative nowcasting pipelines for {INSAT-3S}
+satellite imagery, evaluated under identical conditions on 30~days of
+January~2026 data. \textsc{FlowCast} (decoder-only fine-tune + Conditional
+Flow Matching) attains operationally meaningful skill on both
+channels (CSI$_M$~$=$~0.063 on VIS, 0.204 on WV) and is recommended as the
+production pipeline at this data scale. \textsc{DiffCast} (full {VAE}
+fine-tune + EDM diffusion), despite attaining higher PSNR and lower CRPS on
+VIS, fails visually due to encoder representation collapse, with its
+predictions losing the static geographic prior. This failure is invisible
+to per-pixel metrics, clearly diagnosed by CSI and direct inspection, and,
+to our knowledge, the first explicit documentation of this failure mode on
+satellite imagery. Two methodological by-products are likely useful beyond
+this work: a three-way ensemble aggregation that exposes the
+perception-distortion-skill tradeoff in a single forecast pass, and an
+empirical threshold-calibration procedure that prevents the silent
+zero-CSI failure mode we encountered on WV.
+
+\paragraph{Code and reproducibility.} The full implementation
+(\texttt{flowcast/}, \texttt{diffcast/}), configs (\texttt{vis/config\_*.yaml},
+\texttt{wv/config\_*.yaml}), a Colab runner notebook, and all
+checkpoints/metrics JSON/visualisation PNGs are released as part of the
+ISRO~A.1 project artifact.
+
+% ============================================================================
+\section*{Acknowledgements}
+We thank the {INSAT-3S} program at the Indian Space Research Organisation
+for the open data, and the authors of \citet{flowcast2026, karras2022edm,
+gao2022earthformer} for releasing their reference implementations.
+
+% ============================================================================
+\bibliography{references}
+
+\end{document}

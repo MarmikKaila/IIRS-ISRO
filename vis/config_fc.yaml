@@ -1,0 +1,111 @@
+# ── VIS — FlowCast (ICLR 2026) pipeline configuration ──────────────────────
+# Paper: Perrone Ribeiro & Faganeli Pucer, "FlowCast: Conditional Flow
+# Matching for Precipitation Nowcasting." We follow their architecture and
+# I-CFM objective, using their released SEVIR autoencoder frozen.
+channel: vis
+source_dir: sample-images/Jan26_167972
+file_glob: "*_IMG_VIS.tif"
+
+# FlowCast-pipeline output dirs (parallel to the existing SD-VAE pipeline)
+latent_dir: vis/latents_fc
+manifest_path: vis/manifest_fc.csv
+checkpoint_dir: vis/checkpoints_fc
+output_dir: vis/outputs_fc
+
+# Image preprocessing — same crop/resize as the SD-VAE pipeline
+resize_height: 288
+resize_width: 256
+
+# Normalization — these get auto-filled on the first encode_latents run.
+# DO NOT replace this file once they are filled in unless you intend to
+# recompute the stats and re-encode all latents.
+norm:
+  low: null
+  high: null
+
+# ── FlowCast pretrained VAE (b-rbmp/flowcast-cfm-sevir on HF Hub) ──────────
+vae:
+  hf_id: b-rbmp/flowcast-cfm-sevir
+  hf_filename: saved_models/sevir/autoencoder/models/early_stopping_model.pt
+  # Optional INSAT decoder fine-tune overlay. Uncomment after Phase 2 (Strategy A)
+  # or Phase 5 (Strategy B) produces a checkpoint. Path is repo-root-relative.
+  # decoder_ckpt: vis/checkpoints_fc/vae_decoder_ft_A.pt
+
+# ── VAE decoder fine-tune (Strategy A: real encode-decode pairs + LPIPS) ───
+vae_finetune:
+  steps: 4000
+  batch_size: 8
+  lr: 1.0e-5
+  weight_decay: 1.0e-4
+  mse_weight: 0.1
+  lpips_weight: 1.0
+  lpips_backbone: vgg
+  warmup_steps: 200
+  val_interval: 250
+  log_interval: 50
+  fp16: true
+
+# ── Strategy B: build (predicted_latent, GT) dataset + decoder fine-tune ───
+pair_dataset:
+  output_dir: vis/pred_pairs_fc
+  rollouts_per_day: 4
+  ode_steps: 10
+
+vae_finetune_pred:
+  steps: 4000
+  batch_size: 2
+  grad_accum: 4
+  lr: 5.0e-5
+  weight_decay: 1.0e-5
+  mse_weight: 0.1
+  lpips_weight: 1.0
+  lpips_backbone: vgg
+  warmup_steps: 200
+  val_interval: 250
+  log_interval: 50
+  fp16: true
+
+# Day/night handling (VIS only). Same controls as the SD-VAE config:
+# enabled = true means VIS uses daytime-only contiguous runs (no night-gap
+# bridging) plus a dark fill at the output for night slots; the loss is also
+# weighted to zero on night targets.
+day_night:
+  enabled: true
+  scene_lat: 21.0
+  scene_lon: 79.0
+  elevation_threshold_deg: 0.0
+  daytime_runs_only: true
+
+# Sequence window — VIS daytime runs are only ~22 contiguous 30-min frames,
+# so a paper-spec 13+12=25-frame window doesn't fit. We use 5 + 12 = 17,
+# which yields ~140 training windows over the 31-day dataset.
+sequence:
+  input_len: 5
+  cadence_minutes: 30
+
+# Train/val/test split fractions
+train:
+  val_fraction: 0.1
+  test_fraction: 0.1
+
+# ── CFM flow model (paper-spec, scaled for T4) ─────────────────────────────
+flow:
+  joint_steps: 12          # T_lead — predicted future frames per forward pass
+  hidden: 192              # base feature dim (paper)
+  n_blocks: 4              # cuboid blocks per U-Net stage (paper depth)
+  attn_heads: 4            # paper
+  dropout: 0.1             # paper
+  sigma: 0.01              # I-CFM probability path noise scale (paper)
+  batch_size: 4            # T4 memory; paper used 12 / GPU
+  epochs: 100              # paper used 200 on 4xH100; we scale down
+  lr: 5.0e-4               # paper
+  weight_decay: 1.0e-4     # paper
+  warmup_frac: 0.01        # paper (1% of total steps)
+  ema_decay: 0.999         # paper
+  fp16: true               # paper
+  ode_steps: 10            # paper (Euler 10 steps at sampling)
+  seed: 42
+
+# 48-frame day forecast (4 autoregressive blocks of 12 = 48)
+forecast:
+  horizon: 48

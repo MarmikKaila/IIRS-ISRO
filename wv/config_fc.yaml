@@ -1,0 +1,76 @@
+# ── WV — FlowCast (ICLR 2026) pipeline configuration ──────────────────────
+channel: wv
+source_dir: sample-images/Jan26_168372
+file_glob: "*_IMG_WV.tif"
+
+latent_dir: wv/latents_fc
+manifest_path: wv/manifest_fc.csv
+checkpoint_dir: wv/checkpoints_fc
+output_dir: wv/outputs_fc
+
+resize_height: 288
+resize_width: 256
+
+# Auto-filled on first encode_latents run; do not overwrite once populated.
+norm:
+  low: null
+  high: null
+
+vae:
+  hf_id: b-rbmp/flowcast-cfm-sevir
+  hf_filename: saved_models/sevir/autoencoder/models/early_stopping_model.pt
+  # Uncomment after finetune_vae produces the checkpoint to load it at forecast time.
+  # decoder_ckpt: wv/checkpoints_fc/vae_decoder_ft_A.pt
+
+# ── VAE decoder fine-tune (Strategy A on WV: real encode-decode + LPIPS) ───
+# fp16:true is safe on T4 for the decoder fine-tune (same config that worked
+# for VIS Strategy A). Only the CFM flow trainer had A100 FP16 NaN issues.
+# If running on A100/H100 and you see NaN, switch fp16 to false.
+vae_finetune:
+  steps: 4000
+  batch_size: 8
+  lr: 1.0e-5
+  weight_decay: 1.0e-4
+  mse_weight: 0.1
+  lpips_weight: 1.0
+  lpips_backbone: vgg
+  warmup_steps: 200
+  val_interval: 250
+  log_interval: 50
+  fp16: true
+
+# WV is continuous 24h — no day/night handling needed.
+day_night:
+  enabled: false
+  scene_lat: 21.0
+  scene_lon: 79.0
+  elevation_threshold_deg: 0.0
+  daytime_runs_only: false
+
+sequence:
+  input_len: 13
+  cadence_minutes: 30
+
+train:
+  val_fraction: 0.1
+  test_fraction: 0.1
+
+flow:
+  joint_steps: 12
+  hidden: 192
+  n_blocks: 4
+  attn_heads: 4
+  dropout: 0.1
+  sigma: 0.01
+  batch_size: 4
+  epochs: 100
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  warmup_frac: 0.01
+  ema_decay: 0.999
+  fp16: true
+  ode_steps: 10
+  seed: 42
+
+forecast:
+  horizon: 48
